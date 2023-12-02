@@ -1,20 +1,19 @@
-Voici une analyse des avantages et des inconvénients de différents outils de tests de sécurité automatisés :
+# Analyse des différents outils de tests de sécurité automatisés
 
-OWASP ZAP :
-Avantages:
+## OWASP ZAP
 
-    OWASP ZAP est open source et gratuit.
-    Il possède une interface graphique utilisateur (GUI) facile à utiliser.
-    Il peut être intégré dans des processus de développement logiciel via des API.
-    Il prend en charge divers protocoles et technologies, tels que HTTP, AJAX, SOAP, etc.
+| Avantages | Inconvenients |
+| --------- | ------------- |
+| Open source| Faux+/Faux- |
+| GUI        | Expertise CFG |
+| API disponibles | Impact système|
+| HTTP, AJAX, SOAP, ...||
 
-Inconvénients :
+## Burp Suite
 
-    Il peut produire des faux positifs et faux négatifs.
-    Il peut nécessiter une certaine expertise technique pour configurer et utiliser efficacement.
-    Il peut avoir un impact sur les performances du système.
+| Avantages | Inconvenients |
+| --------- | ------------- |
 
-Burp Suite :
 Avantages :
 
     Burp Suite est un outil de test de sécurité populaire, avec une grande communauté d'utilisateurs.

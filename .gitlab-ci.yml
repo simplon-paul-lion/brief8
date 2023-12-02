@@ -1,0 +1,217 @@
+stages:
+  - build
+  - test
+  - security
+  - scanning_results
+  - deployOnQA
+  - security_after_qa
+  - scanning_results_after_qa
+  - mytest
+  - deployOnProd
+  - validate
+
+services:
+  - docker:20-dind
+
+include:
+  - template: Security/Container-Scanning.gitlab-ci.yml
+  - template: Security/SAST.gitlab-ci.yml
+
+build:
+  image: docker:20
+  stage: build
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_JOB_TOKEN $CI_REGISTRY
+  script:
+    - version=$(grep "ver = \".*\"" azure-vote/main.py | sed "s/ver = \"//" | sed 's/"$//')
+    # fetches the latest image (not failing if image is not found)
+    - docker pull $CI_REGISTRY_IMAGE:latest || true
+    # builds the project, passing proxy variables, using OCI labels
+    # notice the cache-from, which is going to use the image we just pulled locally
+    # the built image is tagged locally with the commit SHA, and then pushed to 
+    # the GitLab registry
+    - >
+      docker build
+      --pull
+      --cache-from $CI_REGISTRY_IMAGE:latest
+      --label "org.opencontainers.image.title=$CI_PROJECT_TITLE"
+      --label "org.opencontainers.image.url=$CI_PROJECT_URL"
+      --label "org.opencontainers.image.created=$CI_JOB_STARTED_AT"
+      --label "org.opencontainers.image.revision=$CI_COMMIT_SHA"
+      --label "org.opencontainers.image.version=$CI_COMMIT_REF_NAME"
+      --tag $CI_REGISTRY_IMAGE:"$version"
+      .
+    - docker push $CI_REGISTRY_IMAGE:"$version"
+    - echo "VERSION=$version" >> build.env
+  artifacts:
+    reports:
+      dotenv: build.env
+  when: always
+
+container_scanning:
+  stage: security
+  dependencies:
+    - build
+  variables:
+    CS_IMAGE: "$CI_REGISTRY_IMAGE:$VERSION"
+    CS_REGISTRY_USER: "$CI_REGISTRY_USER"
+    CS_REGISTRY_PASSWORD: "$CI_JOB_TOKEN"
+  artifacts:
+    paths:
+      - gl-container-scanning-report.json
+
+dast:
+  stage: security_after_qa
+  image: registry.gitlab.com/gitlab-org/security-products/zaproxy
+  variables:
+    website: "https://brief8-qa.simplon-lion.space/"
+  allow_failure: true
+  script:
+    - mkdir -p /zap/wrk/
+    - /zap/zap-baseline.py -g gl-dast-report.json -t $website || true
+    - cp /zap/wrk/gl-dast-report.json ./gl-dast-report.json
+  artifacts:
+    paths:
+    - gl-dast-report.json
+# Check scanning results
+# ----------------------
+
+# Check if the previous scanning reported any vulnerability
+scanning_results_dast:
+  stage: scanning_results_after_qa
+  image: 
+    name: registry.simplon-lion.space/brief8/kubectl:latest
+    entrypoint: [""]
+  script:
+    - export KUBECONFIG=$KUBECONFIG_FILE
+    # Use a simple jq command to check vulnerabilities in the previous JSON report
+    - if [ "$(cat gl-dast-report.json | jq -e "( .vulnerabilities | length ) > 0")" = "true" ]; then echo "true"; exit 1; else echo "false" exit 0; fi
+  dependencies:
+    - dast
+  # Comment if you want job to ignore if there are vulnerabilities
+
+spotbugs-sast:
+  dependencies:
+    - build
+  artifacts:
+    name: sast
+    paths:
+      - gl-sast-report.json
+    reports:
+      sast: gl-sast-report.json
+    when: always
+
+
+scanning_results_container:
+  stage: scanning_results
+  image: 
+    name: registry.simplon-lion.space/brief8/kubectl:latest
+    entrypoint: [""]
+  script:
+    - export KUBECONFIG=$KUBECONFIG_FILE
+    # Use a simple jq command to check vulnerabilities in the previous JSON report
+    - if [ "$(cat gl-container-scanning-report.json | jq -e "( .vulnerabilities | length ) > 0")" = "true" ]; then echo "true"; exit 1; else echo "false" exit 0; fi
+  dependencies:
+    - container_scanning
+  # Comment if you want job to ignore if there are vulnerabilities
+
+deployOnQA:
+  image: 
+    name: registry.simplon-lion.space/brief8/kubectl:latest
+    entrypoint: [""]
+  stage: deployOnQA
+  script:
+    - export KUBECONFIG=$KUBECONFIG_FILE
+    - version=$(kubectl -ojson get deploy votingapp-v1 -n qa | jq -r ".metadata.labels.image")
+    - >
+      id=$(curl -s --header "PRIVATE-TOKEN: $TOKEN" "https://gitlab.simplon-lion.space/api/v4/registry/repositories/3940811?tags=true&tags_count=true&size=true" | jq ".tags| length")
+    - id=$((id-1))
+    - >
+      newversion=$(curl -s --header "PRIVATE-TOKEN: $TOKEN" "https://gitlab.simplon-lion.space/api/v4/registry/repositories/3940811?tags=true&tags_count=true&size=true" | jq -r ".tags[$id].name")
+    - >
+      if [ "$version" != "$newversion" ]; then
+        echo "deploy"
+        sed -i "s/ENVVOTING/qa/g" k8s/ingress.yml
+        sed -i "s/IDVERSION/${newversion}/g" k8s/app.yml
+        kubectl apply -f k8s/ -n qa
+      else
+        echo "no deploy"
+      fi
+    - >
+      echo "New version deploy: $newversion"
+  when: on_success
+
+mytest:
+  image: 
+    name: registry.simplon-lion.space/brief8/kubectl:latest
+    entrypoint: [""]
+  stage: mytest
+  script:
+    - export KUBECONFIG=$KUBECONFIG_FILE
+    - IFS=","
+    - statusPods=($(kubectl get pods -n qa|awk 'NR>1{print $3","}'))
+    - for pod in $statusPods;do  [ "$pod" != "Running" ] && echo "pods offline" && exit 1; done
+    - echo "Pods Running."
+    - httpCode=$(curl -o /dev/null -s -w "%{http_code}\n"  https://brief8-qa.vote.simplon-lion.space/)
+    - >
+      [ "$httpCode" = "200" ] && echo "test http ok" || exit 1
+    - httpCodeVote=$(curl -o /dev/null -s -w "%{http_code}\n" -d "vote=Linux" -X POST https://brief8-qa.vote.simplon-lion.space/)
+    - >
+      [ "$httpCodeVote" = "200" ] && echo "test vote ok" || exit 1
+  when: on_success
+
+deployOnProd:
+  image: 
+    name: registry.simplon-lion.space/brief8/kubectl:latest
+    entrypoint: [""]
+  stage: deployOnProd
+  script:
+    - export KUBECONFIG=$KUBECONFIG_FILE
+    - version=$(kubectl -ojson get deploy votingapp-v1 -n prod | jq -r ".metadata.labels.image")
+    - >
+      id=$(curl -s --header "PRIVATE-TOKEN: $TOKEN" "https://gitlab.simplon-lion.space/api/v4/registry/repositories/3940811?tags=true&tags_count=true&size=true" | jq ".tags| length")
+    - id=$((id-1))
+    - >
+      newversion=$(curl -s --header "PRIVATE-TOKEN: $TOKEN" "https://gitlab.simplon-lion.space/api/v4/registry/repositories/3940811?tags=true&tags_count=true&size=true" | jq -r ".tags[$id].name")
+    - >
+      if [ "$version" != "$newversion" ]; then
+        echo "deploy"
+        sed -i "s/name: votingapp-v1/name: votingapp-v2/g" k8s/app.yml
+        sed -i "s/IDVERSION/${newversion}/g" k8s/app.yml
+        cp k8s/app.yml k8s/canary.yml
+        kubectl apply -f k8s/canary.yml -n prod
+      else
+        echo "no deploy"
+      fi
+    - >
+      echo "New version deploy: $newversion"
+  when: on_success
+
+apply:
+  image: 
+    name: registry.gitlab.simplon-lion.space/brief8/kubectl:latest
+    entrypoint: [""]
+  stage: validate
+  script:
+    - export KUBECONFIG=$KUBECONFIG_FILE
+    - >
+      id=$(curl -s --header "PRIVATE-TOKEN: glpat-cJgsdJCxwXVorGkMZ-6k" "https://gitlab.simplon-lion.space/api/v4/registry/repositories/3940811?tags=true&tags_count=true&size=true" | jq ".tags| length")
+    - id=$((id-1))
+    - >
+      newversion=$(curl -s --header "PRIVATE-TOKEN: $TOKEN" "https://gitlab.simplon-lion.space/api/v4/registry/repositories/3940811?tags=true&tags_count=true&size=true" | jq -r ".tags[$id].name")
+    - sed -i "s/IDVERSION/${newversion}/g" k8s/app.yml
+    - kubectl apply -f k8s/app.yml -n prod
+    - kubectl delete deploy votingapp-v2 -n prod
+    - >
+      echo "New version deploy: $newversion"
+  when: manual
+
+rollback:
+  image: 
+    name: registry.gitlab.simplon-lion.space/brief8/kubectl:latest
+    entrypoint: [""]
+  stage: validate
+  script:
+    - export KUBECONFIG=$KUBECONFIG_FILE
+    - kubectl delete deploy votingapp-v2 -n prod
+  when: manual
