@@ -1,0 +1,13 @@
+kind: TrafficSplit
+apiVersion: split.smi-spec.io/v1alpha2
+metadata:
+  name: canary
+  namespace: prod
+  labels: {}
+spec:
+  service: votingapp
+  backends:
+  - service: votingapp-v1
+    weight: 100
+  - service: votingapp-v2
+    weight: 0

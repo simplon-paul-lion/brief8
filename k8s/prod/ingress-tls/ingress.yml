@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nginx-votingapp
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx-prod
+  rules:
+  - host: brief8-prod.simplon-lion.space
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: votingapp
+            port:
+              number: 80
+  tls: # < placing a host in the TLS config will determine what ends up in the cert's subjectAltNames
+    - hosts:
+      - brief8-prod.simplon-lion.space
+      secretName: secret-tls # < cert-manager will store the created certificate in this secret.
+
+

@@ -1,0 +1,13 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: brief8-qa.simplon-lion.space
+  namespace: qa
+spec:
+  dnsNames:
+  - brief8-qa.simplon-lion.space
+  issuerRef:
+    name: letsencrypt-staging
+    kind: Issuer
+  secretName: secret-tls
+  
